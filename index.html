@@ -1874,7 +1874,7 @@ function monthIndexFromKey(key){ return Number(key.split('-')[1])-1; }
 
 /* Push/remove an amount tied to a calendar event into the matching monthly tab, envelope, debt or fund */
 const FLOW_BUCKETS = {income:'income'};
-function addMonthEntryForEvent(ev, key){
+function addMonthEntryForEvent(ev, key, skipBalanceApply){
   if(!ev.amount || !ev.flowTo || ev.flowTo==='none') return;
   const mi = monthIndexFromKey(key);
   if(ev.flowTo.startsWith('env:')){
@@ -1888,14 +1888,19 @@ function addMonthEntryForEvent(ev, key){
     const debtId = ev.flowTo.slice(5);
     if(!state.debts.some(d=>d.id===debtId)) return;
     ensureDebtMonth(mi);
-    state.debtSpending[pk(mi)][debtId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id});
+    state.debtSpending[pk(mi)][debtId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id, balanceApplied:!skipBalanceApply});
+    // Keep the actual balance on the Debt tab in sync, same as Track a Spend does —
+    // except when the sample-data seeder is bulk-creating a full year of reminders
+    // at once, where the starting balance already represents the intended snapshot.
+    if(!skipBalanceApply) applyDebtPayment(debtId, ev.amount);
     return;
   }
   if(ev.flowTo.startsWith('savings:')){
     const fundId = ev.flowTo.slice(8);
     if(!state.funds.some(f=>f.id===fundId)) return;
     ensureSavingsMonth(mi);
-    state.savingsSpending[pk(mi)][fundId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id});
+    state.savingsSpending[pk(mi)][fundId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id, balanceApplied:!skipBalanceApply});
+    if(!skipBalanceApply) applySavingsContribution(fundId, ev.amount);
     return;
   }
   if(!FLOW_BUCKETS[ev.flowTo]) return;
@@ -1917,16 +1922,18 @@ function removeMonthEntriesForEvent(eventId){
           state.envelopeSpending[k][id] = state.envelopeSpending[k][id].filter(x=>x.sourceEventId!==eventId);
         });
       }
-      // Debt/savings need their balance effect reversed, not just the log entry removed.
+      // Debt/savings need their balance effect reversed, not just the log entry removed —
+      // but only for entries that actually had a balance applied (seeded reminders
+      // intentionally skip that, so there's nothing to reverse for those).
       if(state.debtSpending[k]){
         Object.keys(state.debtSpending[k]).forEach(debtId=>{
-          state.debtSpending[k][debtId].filter(x=>x.sourceEventId===eventId).forEach(x=>reverseDebtPayment(debtId, x.amount));
+          state.debtSpending[k][debtId].filter(x=>x.sourceEventId===eventId && x.balanceApplied).forEach(x=>reverseDebtPayment(debtId, x.amount));
           state.debtSpending[k][debtId] = state.debtSpending[k][debtId].filter(x=>x.sourceEventId!==eventId);
         });
       }
       if(state.savingsSpending[k]){
         Object.keys(state.savingsSpending[k]).forEach(fundId=>{
-          state.savingsSpending[k][fundId].filter(x=>x.sourceEventId===eventId).forEach(x=>reverseSavingsContribution(fundId, x.amount));
+          state.savingsSpending[k][fundId].filter(x=>x.sourceEventId===eventId && x.balanceApplied).forEach(x=>reverseSavingsContribution(fundId, x.amount));
           state.savingsSpending[k][fundId] = state.savingsSpending[k][fundId].filter(x=>x.sourceEventId!==eventId);
         });
       }
@@ -2241,7 +2248,7 @@ function openAddMoneyModal(id){
       // record anyone could later find, edit, or undo.
       const mi = new Date(date+'T00:00:00').getMonth();
       ensureSavingsMonth(mi);
-      state.savingsSpending[pk(mi)][fund.id].push({id:uid(), name, amount:amt, date});
+      state.savingsSpending[pk(mi)][fund.id].push({id:uid(), name, amount:amt, date, balanceApplied:true});
       applySavingsContribution(fund.id, amt);
       saveState(); closeModal(); renderSavings(); renderToday();
     });
@@ -2740,6 +2747,7 @@ function openQuickAddModal(){
         const debt = state.debts.find(d=>d.id===debtId);
         item.name = name || (debt ? debt.name : 'Debt payment');
         ensureDebtMonth(mi);
+        item.balanceApplied = true;
         state.debtSpending[pk(mi)][debtId].push(item);
         applyDebtPayment(debtId, amount);
       } else if(cat==='savings'){
@@ -2748,6 +2756,7 @@ function openQuickAddModal(){
         const fund = state.funds.find(f=>f.id===fundId);
         item.name = name || (fund ? fund.name : 'Savings contribution');
         ensureSavingsMonth(mi);
+        item.balanceApplied = true;
         state.savingsSpending[pk(mi)][fundId].push(item);
         applySavingsContribution(fundId, amount);
       } else {
@@ -3288,7 +3297,7 @@ function wireBudgetCards(el, mi, items, budgetStore, spendStore, onListChange, o
     const [itemId, spendId] = b.dataset.cbItemDel.split('|');
     const removed = spendStore[pk(mi)] && spendStore[pk(mi)][itemId] && spendStore[pk(mi)][itemId].find(x=>x.id===spendId);
     if(spendStore[pk(mi)] && spendStore[pk(mi)][itemId]) spendStore[pk(mi)][itemId] = spendStore[pk(mi)][itemId].filter(x=>x.id!==spendId);
-    if(removed && opts.onReverse) opts.onReverse(itemId, removed.amount);
+    if(removed && opts.onReverse && removed.balanceApplied!==false) opts.onReverse(itemId, removed.amount);
     saveState(); onListChange(true);
   }));
 }
@@ -3319,12 +3328,17 @@ function openItemSpendModal(itemId, items, mi, spendStore, onChange, opts, exist
       if(!spendStore[pk(mi)][itemId]) spendStore[pk(mi)][itemId]=[];
       if(isEdit){
         const idx = spendStore[pk(mi)][itemId].findIndex(x=>x.id===existing.id);
-        if(idx>-1) spendStore[pk(mi)][itemId][idx] = {id:existing.id, name, amount, date};
-        // Undo the old amount's effect on the linked balance, then apply the new one.
-        if(opts.onReverse) opts.onReverse(itemId, existing.amount);
+        if(idx>-1) spendStore[pk(mi)][itemId][idx] = {id:existing.id, name, amount, date, balanceApplied:true};
+        // Undo the old amount's effect on the linked balance, then apply the new one —
+        // but only undo it if it was actually applied in the first place. A seeded
+        // reminder's balanceApplied is explicitly false, since seeding intentionally
+        // skips touching the balance; reversing it anyway would add back money that
+        // was never subtracted. (Older entries with no flag at all predate this and
+        // were always applied, so treat missing as true.)
+        if(opts.onReverse && existing.balanceApplied!==false) opts.onReverse(itemId, existing.amount);
         if(opts.onApply) opts.onApply(itemId, amount);
       } else {
-        spendStore[pk(mi)][itemId].push({id:uid(), name, amount, date});
+        spendStore[pk(mi)][itemId].push({id:uid(), name, amount, date, balanceApplied:true});
         if(opts.onApply) opts.onApply(itemId, amount);
       }
       saveState(); closeModal(); onChange(true);
@@ -3500,7 +3514,7 @@ function seedSampleData(){
       const ev = {id:uid(), type, label, amount, flowTo, seriesId, paid:false};
       if(!state.events[key]) state.events[key]=[];
       state.events[key].push(ev);
-      addMonthEntryForEvent(ev, key);
+      addMonthEntryForEvent(ev, key, true); // skip auto-apply — seeded balances already represent the intended current snapshot
     });
   }
   seedRecurring(1,'payday','Paycheck',2100,'income');
