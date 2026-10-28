@@ -287,8 +287,11 @@ textarea.notes:focus, input:focus, select:focus{outline:2px solid var(--primary)
   width:100%;padding:9px 11px;border:1.5px solid var(--line);border-radius:var(--radius-sm);
   font-size:14px;background:var(--surface);color:var(--ink);
 }
-.field input[type="date"]{ text-align:left; } /* Safari centers date inputs by default, unlike every other input type */
-.field input[type="date"]::-webkit-date-and-time-value{ text-align:left; } /* Safari's internal date text sometimes ignores the outer text-align above on its own */
+.field input[type="date"]{
+  text-align:left;
+  -webkit-appearance:none; appearance:none; /* iOS renders date inputs as a native OS control whose text alignment ignores plain text-align — this forces it back to a normal, stylable field */
+}
+.field input[type="date"]::-webkit-date-and-time-value{ text-align:left; margin-left:0; }
 .field-row{display:flex;gap:10px;}
 .field-row .field{flex:1;min-width:0;}
 
