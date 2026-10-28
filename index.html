@@ -241,6 +241,7 @@ main.content{flex:1;min-width:0;padding:34px 40px 80px;max-width:980px;}
   aspect-ratio:1/0.85;border-radius:10px;border:1px solid var(--line);background:var(--surface);
   padding:6px;display:flex;flex-direction:column;justify-content:space-between;position:relative;
   font-size:12.5px;font-weight:700;color:var(--ink);
+  min-width:0; overflow:hidden; /* a day with lots of dots shouldn't be able to force the whole grid wider than its card */
 }
 .cal-day.pad{background:transparent;border:none;}
 .cal-day:hover{background:var(--surface-alt);cursor:pointer;}
