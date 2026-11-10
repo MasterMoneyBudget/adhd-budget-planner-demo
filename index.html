@@ -168,6 +168,12 @@ main.content{flex:1;min-width:0;padding:34px 40px 80px;max-width:980px;}
 .stat .value{font-family:'Fraunces',serif;font-size:28px;margin-top:4px;font-weight:600;}
 .stat.warm{background:var(--danger-bg);}
 .stat.calm{background:var(--success-bg);}
+.stat .caption{font-size:11.5px;color:var(--ink-soft);font-weight:700;margin-top:4px;line-height:1.4;}
+
+.view-toggle{display:inline-flex;background:var(--surface-alt);border-radius:999px;padding:3px;gap:2px;margin-bottom:12px;}
+.view-toggle button{border:none;background:none;padding:7px 16px;border-radius:999px;font-size:12.5px;font-weight:800;color:var(--ink-soft);}
+.view-toggle button.active{background:var(--surface);color:var(--primary-strong);box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+
 
 .hero{
   background:linear-gradient(135deg, var(--surface-alt), var(--surface));
@@ -595,12 +601,18 @@ textarea.notes:focus, input:focus, select:focus{outline:2px solid var(--primary)
       <div class="year-switcher" id="monthYearSwitcher"></div>
       <div class="month-pills" id="monthPills"></div>
 
+      <div class="view-toggle" id="monthStatsToggle" role="group" aria-label="Show actual or budgeted numbers">
+        <button type="button" data-view="actual">Actual</button>
+        <button type="button" data-view="plan">Budgeted</button>
+      </div>
       <div class="grid-3" id="monthStats"></div>
+      <div id="monthPlanBar"></div>
 
-      <div class="card">
+      <div class="card" style="margin-top:16px;">
         <h3 style="font-size:16px;margin-bottom:4px;">Money in</h3>
         <div class="sub" style="margin-bottom:14px;">Budget what you expect to bring in for <span id="moneyInMonthLabel"></span> — this can change from month to month.</div>
         <div class="field" style="max-width:280px;"><label>Income, expected this month</label><input id="budgetIncome" type="number" min="0" step="0.01" placeholder="0.00"></div>
+        <div class="budget-remaining" id="leftToBudgetLine"></div>
       </div>
 
       <div class="card">
@@ -958,7 +970,7 @@ function setItemBudget(budgetStore, mi, itemId, val){
 }
 function itemActual(spendStore, mi, itemId){
   const k=pk(mi);
-  return sumCat((spendStore[k] && spendStore[k][itemId]) || []);
+  return sumCat((spendStore[k] && spendStore[k][itemId]) || [], k);
 }
 function itemsTotals(items, mi, budgetStore, spendStore){
   let planned=0, actual=0;
@@ -1070,6 +1082,7 @@ function saveState(){
     return; // this change won't be saved — the demo limit has been reached
   }
   clearTimeout(saveTimer);
+  invalidateEventIndex();
   pendingSaveValue = JSON.stringify(state);
   saveTimer=setTimeout(async ()=>{
     const value = pendingSaveValue;
@@ -1256,11 +1269,11 @@ const CURRENCIES = [
 const GUIDE_ITEMS = [
   {t:'Home', d:'Pick any month and see its whole picture at a glance: income vs. spending, where the money is going, and what\'s left to spend, all as charts.'},
   {t:'Today', d:'A quick-glance page for right now: how much you\'ve saved, what you still owe, what\'s safe to spend this month, what\'s coming up, and which goals are in motion.'},
-  {t:'Calendar', d:'Tap any day to add a bill, payday, or note. Give it a fixed amount and send it straight into a specific envelope, income, debt or savings — even repeat every month. Bills can be checked off once paid.'},
+  {t:'Calendar', d:'Tap any day to add a bill, payday, or note. Give it a fixed amount and send it straight into a specific envelope, income, debt or savings — even repeat it. Repeats only fill in dates from today forward, and an amount only counts in your totals once its date arrives (or sooner, if you tick it as paid).'},
   {t:'Goals', d:'The bigger picture behind all this planning. Tap a goal\'s status pill to cycle it between not started, in progress, and done.'},
   {t:'Savings', d:'Set up as many funds as you like — an emergency cushion, a trip, anything — each with its own progress bar and optional target date.'},
   {t:'Debt', d:'List out what you owe. Each debt gets an automatic payoff estimate, and you can sort by highest interest first or smallest balance first.'},
-  {t:'Envelopes', d:'Twelve reusable tabs — one per month. Log income and money in right away, and give every kind of spending — rent, groceries, coffee, travel, anything — its own envelope with a monthly budget. Add as many categories as you need, and use the "Track spending" button in the sidebar to log something from anywhere.'},
+  {t:'Envelopes', d:'Twelve reusable tabs — one per month. Log income and money in right away, and give every kind of spending — rent, groceries, coffee, travel, anything — its own envelope with a monthly budget. Add as many categories as you need, and use the "Track spending" button in the sidebar to log something from anywhere. Switch the top cards to "Budgeted" to compare budgeted income with budgeted spending and see how much is left to budget.'},
   {t:'Yearly review', d:'Tucked under Envelopes. Every month added together into one picture: income vs. spending, savings progress, and debt paid down.'},
   {t:'Settings', d:'Your name, your colorway, night mode, backups, and the option to erase everything and start fresh.'}
 ];
@@ -1772,6 +1785,8 @@ function toggleEventPaid(key, id, checked){
   renderEventRows(getUpcomingEvents(8), 'calUpcoming');
   const homeBills = document.getElementById('homeUpcomingBills');
   if(homeBills) renderEventRows(getUpcomingBillsRestOfMonth(), 'homeUpcomingBills');
+  // Ticking a future item as paid makes it count now, so refresh the totals.
+  refreshAfterDataChange();
 }
 
 /* ============ TODAY ============ */
@@ -1874,8 +1889,17 @@ function monthIndexFromKey(key){ return Number(key.split('-')[1])-1; }
 
 /* Push/remove an amount tied to a calendar event into the matching monthly tab, envelope, debt or fund */
 const FLOW_BUCKETS = {income:'income'};
-function addMonthEntryForEvent(ev, key, skipBalanceApply){
+function addMonthEntryForEvent(ev, key){
   if(!ev.amount || !ev.flowTo || ev.flowTo==='none') return;
+  // File the entry under the event's own year, not whichever year happens to
+  // be on screen — otherwise a series running into next year lands its
+  // next-year dates in this year's (already past) months.
+  const savedYear = currentYear;
+  currentYear = Number(key.split('-')[0]);
+  try{ addMonthEntryForEventInYear(ev, key); }
+  finally{ currentYear = savedYear; }
+}
+function addMonthEntryForEventInYear(ev, key){
   const mi = monthIndexFromKey(key);
   if(ev.flowTo.startsWith('env:')){
     const envId = ev.flowTo.slice(4);
@@ -1888,19 +1912,14 @@ function addMonthEntryForEvent(ev, key, skipBalanceApply){
     const debtId = ev.flowTo.slice(5);
     if(!state.debts.some(d=>d.id===debtId)) return;
     ensureDebtMonth(mi);
-    state.debtSpending[pk(mi)][debtId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id, balanceApplied:!skipBalanceApply});
-    // Keep the actual balance on the Debt tab in sync, same as Track a Spend does —
-    // except when the sample-data seeder is bulk-creating a full year of reminders
-    // at once, where the starting balance already represents the intended snapshot.
-    if(!skipBalanceApply) applyDebtPayment(debtId, ev.amount);
+    state.debtSpending[pk(mi)][debtId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id});
     return;
   }
   if(ev.flowTo.startsWith('savings:')){
     const fundId = ev.flowTo.slice(8);
     if(!state.funds.some(f=>f.id===fundId)) return;
     ensureSavingsMonth(mi);
-    state.savingsSpending[pk(mi)][fundId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id, balanceApplied:!skipBalanceApply});
-    if(!skipBalanceApply) applySavingsContribution(fundId, ev.amount);
+    state.savingsSpending[pk(mi)][fundId].push({id:uid(), name:ev.label, amount:ev.amount, sourceEventId:ev.id});
     return;
   }
   if(!FLOW_BUCKETS[ev.flowTo]) return;
@@ -1922,18 +1941,16 @@ function removeMonthEntriesForEvent(eventId){
           state.envelopeSpending[k][id] = state.envelopeSpending[k][id].filter(x=>x.sourceEventId!==eventId);
         });
       }
-      // Debt/savings need their balance effect reversed, not just the log entry removed —
-      // but only for entries that actually had a balance applied (seeded reminders
-      // intentionally skip that, so there's nothing to reverse for those).
+      // Debt/savings need their balance effect reversed, not just the log entry removed.
       if(state.debtSpending[k]){
         Object.keys(state.debtSpending[k]).forEach(debtId=>{
-          state.debtSpending[k][debtId].filter(x=>x.sourceEventId===eventId && x.balanceApplied).forEach(x=>reverseDebtPayment(debtId, x.amount));
+          state.debtSpending[k][debtId].filter(x=>x.sourceEventId===eventId).forEach(x=>reverseDebtPayment(debtId, x.amount));
           state.debtSpending[k][debtId] = state.debtSpending[k][debtId].filter(x=>x.sourceEventId!==eventId);
         });
       }
       if(state.savingsSpending[k]){
         Object.keys(state.savingsSpending[k]).forEach(fundId=>{
-          state.savingsSpending[k][fundId].filter(x=>x.sourceEventId===eventId && x.balanceApplied).forEach(x=>reverseSavingsContribution(fundId, x.amount));
+          state.savingsSpending[k][fundId].filter(x=>x.sourceEventId===eventId).forEach(x=>reverseSavingsContribution(fundId, x.amount));
           state.savingsSpending[k][fundId] = state.savingsSpending[k][fundId].filter(x=>x.sourceEventId!==eventId);
         });
       }
@@ -1951,7 +1968,17 @@ function dateKeyFromDate(d){ return dateKey(d.getFullYear(), d.getMonth(), d.get
 function generateRecurrenceDates(startKey, pattern){
   const start = new Date(startKey+'T00:00:00');
   if(pattern==='none' || !pattern) return [startKey];
-  const endBoundary = new Date(start); endBoundary.setFullYear(endBoundary.getFullYear()+1);
+  // Repeats only ever fill in dates from today forward. If the chosen start
+  // date is already in the past, the series keeps that day's rhythm (same
+  // weekday / same day of the month) but begins at today, and still runs a
+  // full year ahead from there.
+  const todayKey = todayKeyStr();
+  const today = new Date(todayKey+'T00:00:00');
+  const anchor = start > today ? start : today;
+  const endBoundary = new Date(anchor); endBoundary.setFullYear(endBoundary.getFullYear()+1);
+  return generateRawRecurrenceDates(start, pattern, endBoundary).filter(k=>k>=todayKey);
+}
+function generateRawRecurrenceDates(start, pattern, endBoundary){
   const keys = [];
   if(pattern==='daily'){
     let cur = new Date(start);
@@ -1962,21 +1989,20 @@ function generateRecurrenceDates(startKey, pattern){
   } else if(pattern==='biweekly'){
     let cur = new Date(start);
     while(cur < endBoundary){ keys.push(dateKeyFromDate(cur)); cur.setDate(cur.getDate()+14); }
-  } else if(pattern==='semimonthly'){
-    let cur = new Date(start);
-    while(cur < endBoundary){
-      keys.push(dateKeyFromDate(cur));
-      const second = new Date(cur); second.setDate(second.getDate()+15);
-      if(second < endBoundary) keys.push(dateKeyFromDate(second));
-      cur.setMonth(cur.getMonth()+1);
-    }
-  } else if(pattern==='monthly'){
+  } else if(pattern==='semimonthly' || pattern==='monthly'){
+    // Step month by month from the 1st, then clamp the day — stepping the
+    // date itself (e.g. Jan 31 + 1 month) would roll into March and skip February.
     const day = start.getDate();
-    let cur = new Date(start);
-    while(cur < endBoundary){
-      const daysInMonth = new Date(cur.getFullYear(), cur.getMonth()+1, 0).getDate();
-      keys.push(dateKey(cur.getFullYear(), cur.getMonth(), Math.min(day, daysInMonth)));
-      cur.setMonth(cur.getMonth()+1);
+    for(let m=0; ; m++){
+      const y = start.getFullYear(), mo = start.getMonth()+m;
+      const daysInMonth = new Date(y, mo+1, 0).getDate();
+      const cur = new Date(y, mo, Math.min(day, daysInMonth));
+      if(cur >= endBoundary) break;
+      keys.push(dateKeyFromDate(cur));
+      if(pattern==='semimonthly'){
+        const second = new Date(cur); second.setDate(second.getDate()+15);
+        if(second < endBoundary) keys.push(dateKeyFromDate(second));
+      }
     }
   }
   return keys;
@@ -2013,7 +2039,7 @@ function openDayModal(key){
           </div>
         </div>`).join('') : '<div style="font-size:13px;color:var(--ink-soft);">Nothing added for this day yet.</div>'}
     </div>
-    ${editing ? `<div class="list-empty" style="margin-bottom:10px;">Editing "${escapeHtml(editing.label)}"${editing.seriesId?' — this updates every date in its series, keeping the same schedule.':''}</div>` : ''}
+    ${editing ? `<div class="list-empty" style="margin-bottom:10px;">Editing "${escapeHtml(editing.label)}"${editing.seriesId?' — this updates this date and every later date in its series. Earlier dates stay as they were.':''}</div>` : ''}
     <div class="field-row">
       <div class="field" style="flex:0 0 130px;">
         <label>Type</label>
@@ -2049,6 +2075,9 @@ function openDayModal(key){
         <option value="semimonthly">Semimonthly (twice a month)</option>
         <option value="monthly">Monthly</option>
       </select>
+      <div style="font-size:11.5px;color:var(--ink-soft);font-weight:700;margin-top:6px;line-height:1.45;">
+        ${key < todayKeyStr() ? 'This date has passed, so a repeat starts from today on the same schedule. Past dates are left alone. ' : ''}Amounts sent to an envelope, debt, fund or income only count once their date arrives, or sooner if you tick them as paid.
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn ghost" id="closeDayModal">Close</button>
@@ -2110,10 +2139,12 @@ function openDayModal(key){
       const flowTo=flowSel.value;
 
       if(editing){
-        // Update every occurrence that shares this event's series (or just the
-        // one event if it doesn't repeat) — same dates, new details.
+        // Update this occurrence and every later one in its series (or just the
+        // one event if it doesn't repeat) — same dates, new details. Earlier
+        // occurrences keep whatever they were, so past months aren't rewritten.
         const idsToUpdate = editing.seriesId
-          ? Object.values(state.events).flat().filter(e=>e.seriesId===editing.seriesId).map(e=>e.id)
+          ? Object.keys(state.events).filter(k=>k>=key)
+              .flatMap(k=>state.events[k].filter(e=>e.seriesId===editing.seriesId).map(e=>e.id))
           : [editing.id];
         idsToUpdate.forEach(id=>{
           removeMonthEntriesForEvent(id);
@@ -2248,7 +2279,7 @@ function openAddMoneyModal(id){
       // record anyone could later find, edit, or undo.
       const mi = new Date(date+'T00:00:00').getMonth();
       ensureSavingsMonth(mi);
-      state.savingsSpending[pk(mi)][fund.id].push({id:uid(), name, amount:amt, date, balanceApplied:true});
+      state.savingsSpending[pk(mi)][fund.id].push({id:uid(), name, amount:amt, date});
       applySavingsContribution(fund.id, amt);
       saveState(); closeModal(); renderSavings(); renderToday();
     });
@@ -2451,7 +2482,54 @@ function renderMonthPills(){
   el.innerHTML = MONTH_NAMES.map((m,i)=>`<button class="month-pill${i===currentMonthIndex?' active':''}" data-m="${i}">${m.slice(0,3)}</button>`).join('');
   el.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ currentMonthIndex=Number(b.dataset.m); renderMonths(); }));
 }
-function sumCat(arr){ return arr.reduce((s,i)=>s+Number(i.amount||0),0); }
+/* Calendar-linked entries (anything with a sourceEventId) only count toward
+   totals once their calendar date has arrived — or earlier, if you tick the
+   item as paid — and only in the month tab their date actually belongs to.
+   (Older versions filed a repeating series' next-year dates into this year's
+   tabs; those entries are left exactly where they are, they just no longer
+   add to a month they don't belong to.) Nothing is deleted or rewritten for
+   this. Manual entries always count. */
+let _eventIndexCache = null;
+function invalidateEventIndex(){ _eventIndexCache = null; }
+function getEventIndex(){
+  if(!_eventIndexCache || _eventIndexCache.events!==state.events){
+    const map = {};
+    Object.keys(state.events||{}).forEach(k=>(state.events[k]||[]).forEach(ev=>{ map[ev.id] = {key:k, ev}; }));
+    _eventIndexCache = {events:state.events, map};
+  }
+  return _eventIndexCache.map;
+}
+function todayKeyStr(){ const d=new Date(); return dateKey(d.getFullYear(), d.getMonth(), d.getDate()); }
+/* The calendar date an entry came from, if it came from the calendar. */
+function entryEventKey(entry){
+  if(!entry || !entry.sourceEventId) return null;
+  const hit = getEventIndex()[entry.sourceEventId];
+  return hit ? hit.key : null;
+}
+/* "2026-11-20" -> "2026-10" (the year-monthIndex key every month store uses) */
+function slotKeyFromDateKey(key){ const p=key.split('-'); return Number(p[0])+'-'+(Number(p[1])-1); }
+/* How an entry stands in a given month tab (slotKey):
+   'counts'    — add it up
+   'scheduled' — a calendar item whose date hasn't arrived yet
+   'elsewhere' — a calendar item whose date belongs to a different month/year */
+function entryStatus(entry, slotKey){
+  if(!entry || !entry.sourceEventId) return 'counts';
+  const hit = getEventIndex()[entry.sourceEventId];
+  if(!hit) return 'counts';
+  if(slotKey && slotKeyFromDateKey(hit.key)!==slotKey) return 'elsewhere';
+  if(!hit.ev.paid && hit.key > todayKeyStr()) return 'scheduled';
+  return 'counts';
+}
+function countsIn(slotKey){ return (entry)=>entryStatus(entry, slotKey)==='counts'; }
+function sumCat(arr, slotKey){ return arr.filter(countsIn(slotKey)).reduce((s,i)=>s+Number(i.amount||0),0); }
+/* Little grey line explaining why a listed entry isn't in the totals. */
+function entryStatusNote(entry, slotKey){
+  const st = entryStatus(entry, slotKey);
+  if(st==='counts') return '';
+  const d = new Date(entryEventKey(entry)+'T00:00:00');
+  if(st==='scheduled') return 'Scheduled for '+d.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' · counts once it\'s due';
+  return 'Belongs to '+d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})+' · not counted in this month';
+}
 const CATEGORY_META = {
   income:{listId:'incomeList', rowClass:'income'}
 };
@@ -2464,10 +2542,12 @@ function renderMonthCategoryList(cat){
   const el=document.getElementById(meta.listId);
   const items=data[cat];
   el.innerHTML = items.length ? items.map(i=>{
-    const dateLabel = i.date ? new Date(i.date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
-    const meta2 = [dateLabel, i.notes].filter(Boolean).join(' — ');
+    const iDate = i.date || entryEventKey(i);
+    const dateLabel = iDate ? new Date(iDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+    const statusNote = entryStatusNote(i, pk(currentMonthIndex));
+    const meta2 = [statusNote || dateLabel, i.notes].filter(Boolean).join(' — ');
     return `
-    <div class="row-line ${meta.rowClass}" style="align-items:flex-start;">
+    <div class="row-line ${meta.rowClass}" style="align-items:flex-start;${statusNote?'opacity:.55;':''}">
       <div style="flex:1;">
         <div class="rname">${escapeHtml(i.name)}</div>
         ${meta2 ? `<div style="font-size:12px;color:var(--ink-soft);margin-top:2px;">${escapeHtml(meta2)}</div>` : ''}
@@ -2524,7 +2604,7 @@ function getFirstMonthSeq(){
 function getMonthIncomeAndSpending(year, mi){
   const savedYear = currentYear;
   currentYear = year;
-  const income = sumCat(getMonthData(mi).income);
+  const income = sumCat(getMonthData(mi).income, pk(mi));
   const spending = envelopeTotals(mi).actual + debtItemTotals(mi).actual + savingsItemTotals(mi).actual;
   currentYear = savedYear;
   return {income, spending};
@@ -2549,16 +2629,84 @@ function getEffectiveIncomeForMonth(year, mi){
   const {income} = getMonthIncomeAndSpending(year, mi);
   return startBal + income + getRolloverIntoMonth(year, mi);
 }
+/* Which numbers the Envelopes tab's top cards show: what actually happened,
+   or the plan (budgeted income vs. budgeted spending). This is a display
+   preference only — kept in its own key, never inside your planner data. */
+const MONTH_VIEW_KEY = 'bloomUi_monthStatsView';
+let monthStatsView = (()=>{ try{ return localStorage.getItem(MONTH_VIEW_KEY)==='plan' ? 'plan' : 'actual'; }catch(e){ return 'actual'; } })();
+document.querySelectorAll('#monthStatsToggle button').forEach(b=>b.addEventListener('click',()=>{
+  monthStatsView = b.dataset.view;
+  try{ localStorage.setItem(MONTH_VIEW_KEY, monthStatsView); }catch(e){}
+  renderMonthStatsOnly();
+}));
+function getMonthPlan(mi){
+  const env = envelopeTotals(mi), debtTot = debtItemTotals(mi), savingsTot = savingsItemTotals(mi);
+  const income = getIncomeBudget(mi);
+  const spending = env.planned + debtTot.planned + savingsTot.planned;
+  return {income, spending, left: income-spending, env:env.planned, debt:debtTot.planned, savings:savingsTot.planned};
+}
+function renderPlanBar(plan){
+  const el = document.getElementById('monthPlanBar');
+  if(monthStatsView!=='plan'){ el.innerHTML=''; return; }
+  if(!plan.income && !plan.spending){
+    el.innerHTML = `<div class="list-empty" style="margin-top:12px;">Enter your expected income under Money in, then give each envelope, debt and fund a budget. This shows how much is still left to budget.</div>`;
+    return;
+  }
+  const denom = Math.max(plan.income, plan.spending, 1);
+  const parts = [
+    {label:'Envelopes', value:plan.env, color:'var(--warning)'},
+    {label:'Debt', value:plan.debt, color:'var(--primary-strong)'},
+    {label:'Savings', value:plan.savings, color:'var(--info)'}
+  ];
+  let segs = parts.filter(p=>p.value>0).map(p=>`<div title="${p.label}: ${fmtMoneyPlain(p.value)}" style="width:${(p.value/denom)*100}%;background:${p.color};height:100%;"></div>`).join('');
+  if(plan.left>0) segs += `<div title="Left to budget: ${fmtMoneyPlain(plan.left)}" style="width:${(plan.left/denom)*100}%;background:var(--success-bg);height:100%;border-left:2px dashed var(--success);"></div>`;
+  const pctAssigned = plan.income>0 ? Math.round((plan.spending/plan.income)*100) : 0;
+  el.innerHTML = `
+    <div class="card" style="margin-top:16px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12.5px;font-weight:800;color:var(--ink-soft);margin-bottom:8px;">
+        <span>Budgeted spending vs. budgeted income</span>
+        <span>${plan.income>0 ? pctAssigned+'% of expected income has a job' : 'No expected income entered yet'}</span>
+      </div>
+      <div style="height:22px;border-radius:8px;overflow:hidden;display:flex;background:var(--surface-alt);">${segs}</div>
+      <div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-soft);font-weight:700;">
+        ${parts.map(p=>`<span><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${p.color};margin-right:4px;vertical-align:middle;"></span>${p.label} ${fmtMoneyPlain(p.value)}</span>`).join('')}
+        <span><span style="display:inline-block;width:9px;height:9px;border-radius:3px;border:2px dashed var(--success);margin-right:4px;vertical-align:middle;"></span>Left to budget</span>
+      </div>
+    </div>`;
+}
+function renderLeftToBudgetLine(plan){
+  const el = document.getElementById('leftToBudgetLine');
+  if(!el) return;
+  if(!plan.income){ el.textContent = plan.spending ? `${fmtMoneyPlain(plan.spending)} budgeted, with no expected income entered yet` : ''; el.className='budget-remaining'; return; }
+  if(plan.left>=0){
+    el.textContent = plan.left===0 ? 'Every dollar is budgeted · $0 left to budget' : `${fmtMoneyPlain(plan.left)} left to budget`;
+    el.className = 'budget-remaining calm';
+  } else {
+    el.textContent = `Over-budgeted by ${fmtMoneyPlain(Math.abs(plan.left))}: your budgets add up to more than you expect to bring in`;
+    el.className = 'budget-remaining warm';
+  }
+}
 function renderMonthStatsOnly(){
   const incomeActual = getEffectiveIncomeForMonth(currentYear, currentMonthIndex);
   const env = envelopeTotals(currentMonthIndex);
   const debtTot = debtItemTotals(currentMonthIndex);
   const savingsTot = savingsItemTotals(currentMonthIndex);
   const totalOut=env.actual+debtTot.actual+savingsTot.actual;
-  document.getElementById('monthStats').innerHTML = `
-    <div class="stat calm"><div class="label">Income</div><div class="value">${fmtMoneyPlain(incomeActual)}</div></div>
-    <div class="stat warm"><div class="label">Total spending</div><div class="value">${fmtMoneyPlain(totalOut)}</div></div>
-    <div class="stat"><div class="label">Safe to spend</div><div class="value">${fmtMoneyPlain(incomeActual-totalOut)}</div></div>`;
+  const plan = getMonthPlan(currentMonthIndex);
+  document.querySelectorAll('#monthStatsToggle button').forEach(b=>b.classList.toggle('active', b.dataset.view===monthStatsView));
+  if(monthStatsView==='plan'){
+    document.getElementById('monthStats').innerHTML = `
+      <div class="stat calm"><div class="label">Budgeted income</div><div class="value">${fmtMoneyPlain(plan.income)}</div><div class="caption">What you expect to bring in</div></div>
+      <div class="stat warm"><div class="label">Budgeted spending</div><div class="value">${fmtMoneyPlain(plan.spending)}</div><div class="caption">Envelopes + debt + savings budgets</div></div>
+      <div class="stat ${plan.left>=0?'calm':'warm'}"><div class="label">${plan.left>=0?'Left to budget':'Over-budgeted by'}</div><div class="value">${fmtMoneyPlain(Math.abs(plan.left))}</div><div class="caption">Budgeted income minus budgeted spending</div></div>`;
+  } else {
+    document.getElementById('monthStats').innerHTML = `
+      <div class="stat calm"><div class="label">Income</div><div class="value">${fmtMoneyPlain(incomeActual)}</div></div>
+      <div class="stat warm"><div class="label">Total spending</div><div class="value">${fmtMoneyPlain(totalOut)}</div></div>
+      <div class="stat"><div class="label">Safe to spend</div><div class="value">${fmtMoneyPlain(incomeActual-totalOut)}</div></div>`;
+  }
+  renderPlanBar(plan);
+  renderLeftToBudgetLine(plan);
   renderItemGroupSummary('envelopesBudgetSummary', env, 'left across envelopes', 'over, across envelopes');
   renderItemGroupSummary('debtBudgetSummary', debtTot, 'left across debts', 'over, across debts');
   renderItemGroupSummary('savingsBudgetSummary', savingsTot, 'left across funds', 'over, across funds');
@@ -2747,7 +2895,6 @@ function openQuickAddModal(){
         const debt = state.debts.find(d=>d.id===debtId);
         item.name = name || (debt ? debt.name : 'Debt payment');
         ensureDebtMonth(mi);
-        item.balanceApplied = true;
         state.debtSpending[pk(mi)][debtId].push(item);
         applyDebtPayment(debtId, amount);
       } else if(cat==='savings'){
@@ -2756,7 +2903,6 @@ function openQuickAddModal(){
         const fund = state.funds.find(f=>f.id===fundId);
         item.name = name || (fund ? fund.name : 'Savings contribution');
         ensureSavingsMonth(mi);
-        item.balanceApplied = true;
         state.savingsSpending[pk(mi)][fundId].push(item);
         applySavingsContribution(fundId, amount);
       } else {
@@ -2777,7 +2923,7 @@ function renderYearly(){
   let totalIncome=0, totalExpense=0;
   const perMonth=[];
   for(let i=0;i<12;i++){
-    const inc = sumCat(getMonthData(i).income);
+    const inc = sumCat(getMonthData(i).income, pk(i));
     const exp = envelopeTotals(i).actual+debtItemTotals(i).actual+savingsItemTotals(i).actual;
     totalIncome+=inc; totalExpense+=exp;
     perMonth.push({i, inc, exp, left: inc-exp});
@@ -3040,22 +3186,23 @@ function renderTranslogMonthPills(){
 }
 function getAllTransactionsForMonth(mi){
   const rows=[];
+  // Calendar items that aren't due yet aren't real transactions yet — leave them out.
   ensureEnvelopeMonth(mi);
   state.envelopes.forEach(env=>{
-    (state.envelopeSpending[pk(mi)][env.id]||[]).forEach(it=>{
-      rows.push({date:it.date, tag:env.name, catLabel:'Envelope', name:it.name, amount:Number(it.amount||0), color:'var(--warning)'});
+    (state.envelopeSpending[pk(mi)][env.id]||[]).filter(countsIn(pk(mi))).forEach(it=>{
+      rows.push({date:it.date||entryEventKey(it), tag:env.name, catLabel:'Envelope', name:it.name, amount:Number(it.amount||0), color:'var(--warning)'});
     });
   });
   ensureDebtMonth(mi);
   state.debts.forEach(d=>{
-    (state.debtSpending[pk(mi)][d.id]||[]).forEach(it=>{
-      rows.push({date:it.date, tag:d.name, catLabel:'Debt', name:it.name, amount:Number(it.amount||0), color:'var(--primary-strong)'});
+    (state.debtSpending[pk(mi)][d.id]||[]).filter(countsIn(pk(mi))).forEach(it=>{
+      rows.push({date:it.date||entryEventKey(it), tag:d.name, catLabel:'Debt', name:it.name, amount:Number(it.amount||0), color:'var(--primary-strong)'});
     });
   });
   ensureSavingsMonth(mi);
   state.funds.forEach(f=>{
-    (state.savingsSpending[pk(mi)][f.id]||[]).forEach(it=>{
-      rows.push({date:it.date, tag:f.name, catLabel:'Savings', name:it.name, amount:Number(it.amount||0), color:'var(--info)'});
+    (state.savingsSpending[pk(mi)][f.id]||[]).filter(countsIn(pk(mi))).forEach(it=>{
+      rows.push({date:it.date||entryEventKey(it), tag:f.name, catLabel:'Savings', name:it.name, amount:Number(it.amount||0), color:'var(--info)'});
     });
   });
   rows.sort((a,b)=> (a.date||'9999').localeCompare(b.date||'9999'));
@@ -3085,18 +3232,18 @@ function renderTranslog(){
 function categoryTotalsForMonth(mi){
   const data=getMonthData(mi);
   return {
-    income: sumCat(data.income),
-    bills: sumCat(data.bills),
-    expenses: sumCat(data.expenses),
-    debt: sumCat(data.debt),
-    savings: sumCat(data.savings)
+    income: sumCat(data.income, pk(mi)),
+    bills: sumCat(data.bills, pk(mi)),
+    expenses: sumCat(data.expenses, pk(mi)),
+    debt: sumCat(data.debt, pk(mi)),
+    savings: sumCat(data.savings, pk(mi))
   };
 }
 function getBudgetCategories(mi){
   const env = envelopeTotals(mi);
   const debtTot = debtItemTotals(mi);
   const savingsTot = savingsItemTotals(mi);
-  const incomeActual = sumCat(getMonthData(mi).income);
+  const incomeActual = sumCat(getMonthData(mi).income, pk(mi));
   return [
     {label:'Income', planned:getIncomeBudget(mi), actual:incomeActual, color:'var(--success)'},
     {label:'Envelopes', planned:env.planned, actual:env.actual, color:'var(--warning)'},
@@ -3135,11 +3282,11 @@ function getSubcategorySegments(mi){
   const items=[];
   const monthData = getMonthData(mi);
   ['bills','expenses','debt','savings'].forEach(cat=>{
-    monthData[cat].forEach(it=> items.push({name:(it.name||'Untitled').trim(), amount:Number(it.amount||0)}));
+    monthData[cat].filter(countsIn(pk(mi))).forEach(it=> items.push({name:(it.name||'Untitled').trim(), amount:Number(it.amount||0)}));
   });
   ensureEnvelopeMonth(mi);
   state.envelopes.forEach(env=>{
-    (state.envelopeSpending[pk(mi)][env.id]||[]).forEach(it=> items.push({name:(it.name||'Untitled').trim(), amount:Number(it.amount||0)}));
+    (state.envelopeSpending[pk(mi)][env.id]||[]).filter(countsIn(pk(mi))).forEach(it=> items.push({name:(it.name||'Untitled').trim(), amount:Number(it.amount||0)}));
   });
   const map={};
   items.forEach(it=>{
@@ -3204,9 +3351,11 @@ function budgetCardsHtml(mi, items, budgetStore, spendStore, opts){
     const pct = planned>0 ? clamp(Math.round((actual/planned)*100),0,999) : (actual>0?100:0);
     const remaining = planned-actual;
     const itemsHtml = spendItems.length ? spendItems.map(x=>{
-      const dateLabel = x.date ? new Date(x.date+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
-      const metaLine = [dateLabel, x.notes].filter(Boolean).join(' — ');
-      return `<div class="row-line" style="align-items:flex-start;">
+      const xDate = x.date || entryEventKey(x);
+      const dateLabel = xDate ? new Date(xDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+      const statusNote = entryStatusNote(x, pk(mi));
+      const metaLine = [statusNote || dateLabel, x.notes].filter(Boolean).join(' — ');
+      return `<div class="row-line" style="align-items:flex-start;${statusNote?'opacity:.55;':''}">
         <div style="flex:1;"><div class="rname">${escapeHtml(x.name)}</div>${metaLine?`<div style="font-size:11.5px;color:var(--ink-soft);margin-top:2px;">${escapeHtml(metaLine)}</div>`:''}</div>
         <div class="ramt">${fmtMoneyPlain(x.amount)}</div>
         <button class="icon-btn" data-cb-item-edit="${it.id}|${x.id}">Edit</button>
@@ -3297,7 +3446,7 @@ function wireBudgetCards(el, mi, items, budgetStore, spendStore, onListChange, o
     const [itemId, spendId] = b.dataset.cbItemDel.split('|');
     const removed = spendStore[pk(mi)] && spendStore[pk(mi)][itemId] && spendStore[pk(mi)][itemId].find(x=>x.id===spendId);
     if(spendStore[pk(mi)] && spendStore[pk(mi)][itemId]) spendStore[pk(mi)][itemId] = spendStore[pk(mi)][itemId].filter(x=>x.id!==spendId);
-    if(removed && opts.onReverse && removed.balanceApplied!==false) opts.onReverse(itemId, removed.amount);
+    if(removed && opts.onReverse) opts.onReverse(itemId, removed.amount);
     saveState(); onListChange(true);
   }));
 }
@@ -3328,17 +3477,12 @@ function openItemSpendModal(itemId, items, mi, spendStore, onChange, opts, exist
       if(!spendStore[pk(mi)][itemId]) spendStore[pk(mi)][itemId]=[];
       if(isEdit){
         const idx = spendStore[pk(mi)][itemId].findIndex(x=>x.id===existing.id);
-        if(idx>-1) spendStore[pk(mi)][itemId][idx] = {id:existing.id, name, amount, date, balanceApplied:true};
-        // Undo the old amount's effect on the linked balance, then apply the new one —
-        // but only undo it if it was actually applied in the first place. A seeded
-        // reminder's balanceApplied is explicitly false, since seeding intentionally
-        // skips touching the balance; reversing it anyway would add back money that
-        // was never subtracted. (Older entries with no flag at all predate this and
-        // were always applied, so treat missing as true.)
-        if(opts.onReverse && existing.balanceApplied!==false) opts.onReverse(itemId, existing.amount);
+        if(idx>-1) spendStore[pk(mi)][itemId][idx] = {id:existing.id, name, amount, date};
+        // Undo the old amount's effect on the linked balance, then apply the new one.
+        if(opts.onReverse) opts.onReverse(itemId, existing.amount);
         if(opts.onApply) opts.onApply(itemId, amount);
       } else {
-        spendStore[pk(mi)][itemId].push({id:uid(), name, amount, date, balanceApplied:true});
+        spendStore[pk(mi)][itemId].push({id:uid(), name, amount, date});
         if(opts.onApply) opts.onApply(itemId, amount);
       }
       saveState(); closeModal(); onChange(true);
@@ -3442,6 +3586,7 @@ function openNewEnvelopeModal(onChange){
 document.getElementById('budgetIncome').addEventListener('input',(e)=>{
   setIncomeBudget(currentMonthIndex, parseFloat(e.target.value)||0);
   saveState();
+  renderMonthStatsOnly();
 });
 
 // Best-effort safety net: if the page is closed/navigated away while a save
@@ -3514,7 +3659,7 @@ function seedSampleData(){
       const ev = {id:uid(), type, label, amount, flowTo, seriesId, paid:false};
       if(!state.events[key]) state.events[key]=[];
       state.events[key].push(ev);
-      addMonthEntryForEvent(ev, key, true); // skip auto-apply — seeded balances already represent the intended current snapshot
+      addMonthEntryForEvent(ev, key);
     });
   }
   seedRecurring(1,'payday','Paycheck',2100,'income');
